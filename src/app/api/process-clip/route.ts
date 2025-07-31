@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import youtubedl from 'youtube-dl-exec';
-import ffmpeg from 'ffmpeg-static';
-import { spawn } from 'child_process';
 import { ConvexHttpClient } from 'convex/browser';
 import { api } from '../../../../convex/_generated/api';
 import { Id } from '../../../../convex/_generated/dataModel';
-import { readFileSync, unlinkSync } from 'fs';
 
 const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL!);
 
@@ -43,73 +39,39 @@ export async function POST(request: NextRequest) {
 
 async function processClipAsync(clipId: Id<"clips">, videoId: string, startTime: number, endTime: number) {
   try {
-    // Download video info to get the best quality URL
-    const videoInfo = await youtubedl(`https://www.youtube.com/watch?v=${videoId}`, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      format: 'best[height<=1080][ext=mp4]/best[ext=mp4]/best',
-    }) as { url?: string };
-
-    if (!videoInfo || !videoInfo.url) {
-      throw new Error('Could not extract video URL');
-    }
-
-    // Create temporary filenames
-    const tempOutputPath = `/tmp/clip_${clipId}_${Date.now()}.mp4`;
+    // Call the Python video processing function
+    const baseUrl = process.env.VERCEL_URL 
+      ? `https://${process.env.VERCEL_URL}` 
+      : process.env.NODE_ENV === 'development' 
+        ? 'http://localhost:3000' 
+        : 'https://nice-clips.vercel.app';
     
-    // Use FFmpeg to extract the clip
-    await new Promise<void>((resolve, reject) => {
-      const ffmpegProcess = spawn(ffmpeg!, [
-        '-ss', startTime.toString(),
-        '-i', videoInfo.url as string,
-        '-t', (endTime - startTime).toString(),
-        '-c', 'copy', // Use stream copy for speed
-        '-avoid_negative_ts', 'make_zero',
-        tempOutputPath,
-        '-y' // Overwrite output file
-      ]);
-
-      ffmpegProcess.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`FFmpeg process exited with code ${code}`));
-        }
-      });
-
-      ffmpegProcess.on('error', (error) => {
-        reject(error);
-      });
-    });
-
-    // Upload to Cloudflare R2
-    const videoFileName = `clips/${clipId}.mp4`;
-    const videoBuffer = readFileSync(tempOutputPath);
-    
-    const uploadResponse = await fetch(`https://44936cff27d6568454e39cf5ca432fb7.r2.cloudflarestorage.com/nice-clips-1/${videoFileName}`, {
-      method: 'PUT',
-      body: videoBuffer,
+    const processingResponse = await fetch(`${baseUrl}/api/process-video`, {
+      method: 'POST',
       headers: {
-        'Content-Type': 'video/mp4',
+        'Content-Type': 'application/json',
       },
+      body: JSON.stringify({
+        videoId,
+        startTime,
+        endTime,
+        clipId,
+      }),
     });
 
-    if (!uploadResponse.ok) {
-      throw new Error(`Failed to upload to R2: ${uploadResponse.statusText}`);
+    if (!processingResponse.ok) {
+      const errorText = await processingResponse.text();
+      throw new Error(`Video processing failed: ${errorText}`);
     }
 
-    // Clean up temporary file
-    unlinkSync(tempOutputPath);
-
-    const videoUrl = `https://44936cff27d6568454e39cf5ca432fb7.r2.cloudflarestorage.com/nice-clips-1/${videoFileName}`;
-    const thumbnailUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
-
+    const result = await processingResponse.json();
+    
     // Update clip status to completed
     await convex.mutation(api.clips.updateClipStatus, {
       clipId,
       status: 'completed',
-      videoUrl,
-      thumbnailUrl,
+      videoUrl: result.videoUrl,
+      thumbnailUrl: result.thumbnailUrl,
     });
 
     console.log(`Clip ${clipId} processed and uploaded successfully`);

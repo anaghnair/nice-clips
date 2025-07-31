@@ -1,0 +1,13 @@
+{
+  "functions": {
+    "src/app/api/process-clip/route.ts": {
+      "maxDuration": 900,
+      "memory": 1024
+    },
+    "api/process-video.py": {
+      "runtime": "python3.9",
+      "maxDuration": 900,
+      "memory": 1024
+    }
+  }
+}
